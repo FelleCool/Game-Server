@@ -7,11 +7,11 @@
 int main() {
     printf("start\n");
     WSADATA wsaData;
-    int iResult;
+    int bResult;
 
-    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
-    if (iResult != 0) {
-        printf("WSAStartup failed: %d\n", iResult);
+    bResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (bResult != 0) {
+        printf("WSAStartup failed: %d\n", bResult);
         return 1;
     }
 
@@ -34,8 +34,8 @@ int main() {
 
 
     
-    iResult = bind(listenSocket, (SOCKADDR*)&service, sizeof(service));
-    if (iResult == SOCKET_ERROR) {
+    bResult = bind(listenSocket, (SOCKADDR*)&service, sizeof(service));
+    if (bResult == SOCKET_ERROR) {
         printf("bind failed: %d\n", WSAGetLastError());
         closesocket(listenSocket);
         WSACleanup();
@@ -45,9 +45,12 @@ int main() {
 
     //lisener
     bool lisenig = true;
-    while(lisenig == true){
-        listen(listenSocket, SOMAXCONN);
-        if (iResult == SOCKET_ERROR) {
+    const int BUFFER_LENGHT = 200;
+    const int BUFFER_FLAGS = 0;
+    char buffer[BUFFER_LENGHT];
+
+    listen(listenSocket, BUFFER_LENGHT);
+        if (bResult == SOCKET_ERROR) {
         printf("listen failed: %d\n", WSAGetLastError());
         closesocket(listenSocket);
         WSACleanup();
@@ -63,6 +66,18 @@ int main() {
         return 1;
         }
         printf("Client connected!\n");
+        
+    while(lisenig == true){
+        
+
+        int mesage = recv(clientSocket, buffer, BUFFER_LENGHT, BUFFER_FLAGS);
+        if(mesage >= 0){
+            printf("send ok\n");
+            send(clientSocket, "ok\n", 3,BUFFER_FLAGS);
+            
+        }
+        printf("antal teken: %d \n", mesage);
+        printf("buffer: %.*s \n", mesage, buffer);
     }
 
     closesocket(listenSocket);
