@@ -1,15 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #pragma comment(lib, "Ws2_32.lib")
 
 #define PORT 8080
-#define BUFFER_LENGTH 200
+#define BUFFER_LEN 200
 
-// Rita brädet
-void ritaBord(char board[3][3]) {
+char board[3][3];
+char myPlayer = 'X';
+char opponentPlayer = 'O';
+SOCKET ConnectSocket;
+HANDLE recvThread;
+volatile bool myTurn = true; // X börjar alltid
+
+void ritaBord() {
     printf("\n");
     for (int i = 0; i < 3; i++) {
         printf(" %c | %c | %c \n", board[i][0], board[i][1], board[i][2]);
@@ -18,119 +26,160 @@ void ritaBord(char board[3][3]) {
     printf("\n");
 }
 
-// Kontrollera om någon har vunnit
-char checkWinner(char board[3][3]) {
+bool checkWin(char player) {
     for (int i = 0; i < 3; i++) {
-        // Rad
-        if (board[i][0] == board[i][1] && board[i][1] == board[i][2])
-            return board[i][0];
-        // Kolumn
-        if (board[0][i] == board[1][i] && board[1][i] == board[2][i])
-            return board[0][i];
+        if (board[i][0]==player && board[i][1]==player && board[i][2]==player) return true;
+        if (board[0][i]==player && board[1][i]==player && board[2][i]==player) return true;
     }
-    // Diagonaler
-    if (board[0][0] == board[1][1] && board[1][1] == board[2][2])
-        return board[0][0];
-    if (board[0][2] == board[1][1] && board[1][1] == board[2][0])
-        return board[0][2];
-    return ' ';
+    if (board[0][0]==player && board[1][1]==player && board[2][2]==player) return true;
+    if (board[0][2]==player && board[1][1]==player && board[2][0]==player) return true;
+    return false;
 }
 
-// Kontrollera om brädet är fullt
-int isFull(char board[3][3]) {
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            if (board[i][j] == ' ') return 0;
-    return 1;
+bool boardFull() {
+    for (int i=0;i<3;i++)
+        for (int j=0;j<3;j++)
+            if (board[i][j]==' ') return false;
+    return true;
+}
+
+// Tråd som tar emot drag från motståndaren
+DWORD WINAPI receiveThread(LPVOID lpParam) {
+    char buffer[BUFFER_LEN];
+    char leftover[BUFFER_LEN] = "";
+    
+    while (1) {
+        int bytes = recv(ConnectSocket, buffer, BUFFER_LEN-1, 0);
+        if (bytes <= 0) break;
+        buffer[bytes] = '\0';
+
+        char temp[BUFFER_LEN*2];
+        snprintf(temp, sizeof(temp), "%s%s", leftover, buffer);
+
+        char *line = strtok(temp, "\n");
+        while (line != NULL) {
+            int row, col;
+            if (sscanf(line, "DRAG %d %d", &row, &col) == 2) {
+                board[row-1][col-1] = opponentPlayer;
+                printf("Motståndaren spelar: %d %d\n", row, col);
+                ritaBord();
+
+                if (checkWin(opponentPlayer)) {
+                    printf("Du förlorade!\n");
+                    exit(0);
+                }
+                if (boardFull()) {
+                    printf("Oavgjort!\n");
+                    exit(0);
+                }
+
+                myTurn = true; // Nu är det min tur
+            }
+
+            line = strtok(NULL, "\n");
+        }
+
+        // Spara kvarvarande data utan newline
+        char *lastNewline = strrchr(temp, '\n');
+        if (lastNewline) strcpy(leftover, lastNewline+1);
+        else leftover[0] = '\0';
+    }
+    return 0;
 }
 
 int main() {
     WSADATA wsaData;
-    SOCKET ConnectSocket = INVALID_SOCKET;
-    struct sockaddr_in serverAddr;
-    char buffer[BUFFER_LENGTH];
-    int result;
+    WSAStartup(MAKEWORD(2,2), &wsaData);
 
-    // Initiera Winsock
-    result = WSAStartup(MAKEWORD(2,2), &wsaData);
-    if (result != 0) {
-        printf("WSAStartup failed: %d\n", result);
-        return 1;
-    }
-
-    // Skapa socket
     ConnectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ConnectSocket == INVALID_SOCKET) {
-        printf("Socket creation failed: %d\n", WSAGetLastError());
+        printf("Socket error: %d\n", WSAGetLastError());
         WSACleanup();
         return 1;
     }
 
-    // Serveradress
+    struct sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(PORT);
-    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr); // localhost
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
-    // Anslut till servern
-    result = connect(ConnectSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
-    if (result == SOCKET_ERROR) {
-        printf("Unable to connect to server! %d\n", WSAGetLastError());
+    if (connect(ConnectSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        printf("Connect error: %d\n", WSAGetLastError());
         closesocket(ConnectSocket);
         WSACleanup();
         return 1;
     }
 
-    printf("Ansluten till servern!\n");
-
     // Initiera bräde
-    char board[3][3] = {
-        {' ', ' ', ' '},
-        {' ', ' ', ' '},
-        {' ', ' ', ' '}
-    };
+    for (int i=0;i<3;i++)
+        for (int j=0;j<3;j++)
+            board[i][j]=' ';
 
-    char currentPlayer = 'X';
-    int row, col;
+    // Matchningskod
+    char code[50];
+    printf("Ange matchningskod: ");
+    scanf("%s", code);
+    send(ConnectSocket, code, (int)strlen(code), 0);
 
+    char buffer[BUFFER_LEN];
+    int bytes = recv(ConnectSocket, buffer, BUFFER_LEN-1, 0);
+    buffer[bytes] = '\0';
+
+    if (strcmp(buffer, "MATCH_FOUND\n") == 0) {
+        printf("Matchning hittad! Spelet startar...\n");
+    } else {
+        printf("Väntar på motståndare...\n");
+        while (1) {
+            bytes = recv(ConnectSocket, buffer, BUFFER_LEN-1, 0);
+            if (bytes <= 0) {
+                printf("Server stängde anslutningen.\n");
+                return 0;
+            }
+            buffer[bytes] = '\0';
+            if (strcmp(buffer, "MATCH_FOUND\n") == 0) break;
+        }
+        printf("Matchning hittad! Spelet startar...\n");
+    }
+
+    // Starta tråd för att ta emot drag
+    recvThread = CreateThread(NULL, 0, receiveThread, NULL, 0, NULL);
+
+    // Huvud-loop
+    ritaBord(); // Rita initialt bräde
     while (1) {
-        ritaBord(board);
-        printf("Spelare %c, ange rad (1-3) och kolumn (1-3): ", currentPlayer);
-        scanf("%d %d", &row, &col);
+        if (myTurn) {
+            int row, col;
+            printf("Din tur (%c). Ange rad (1-3) och kolumn (1-3): ", myPlayer);
+            while (1) {
+                scanf("%d %d", &row, &col);
+                if (row>=1 && row<=3 && col>=1 && col<=3 && board[row-1][col-1]==' ') break;
+                printf("Ogiltigt drag, försök igen: ");
+            }
 
-        if (row < 1 || row > 3 || col < 1 || col > 3 || board[row-1][col-1] != ' ') {
-            printf("Ogiltigt drag. Försök igen.\n");
-            continue;
+            board[row-1][col-1] = myPlayer;
+            ritaBord();
+
+            sprintf(buffer, "DRAG %d %d\n", row, col); // Lägg till newline
+            send(ConnectSocket, buffer, (int)strlen(buffer), 0);
+
+            if (checkWin(myPlayer)) {
+                printf("Du vann!\n");
+                break;
+            }
+            if (boardFull()) {
+                printf("Oavgjort!\n");
+                break;
+            }
+
+            myTurn = false;
+        } else {
+            static bool printed = false;
+            if (!printed) {
+                printf("Väntar på motståndarens drag...\n");
+                printed = true;
+            }
+            Sleep(500);
         }
-
-        board[row-1][col-1] = currentPlayer;
-
-        // Skicka draget till servern
-        sprintf(buffer, "%d %d %c", row, col, currentPlayer);
-        send(ConnectSocket, buffer, strlen(buffer), 0);
-
-        // Läs svar
-        int bytesReceived = recv(ConnectSocket, buffer, BUFFER_LENGTH, 0);
-        if (bytesReceived > 0) {
-            buffer[bytesReceived] = '\0';
-            printf("Server: %s\n", buffer);
-        }
-
-        // Kontrollera vinnare
-        char winner = checkWinner(board);
-        if (winner != ' ') {
-            ritaBord(board);
-            printf("Spelare %c vinner!\n", winner);
-            break;
-        }
-
-        if (isFull(board)) {
-            ritaBord(board);
-            printf("Oavgjort!\n");
-            break;
-        }
-
-        // Växla spelare
-        currentPlayer = (currentPlayer == 'X') ? 'O' : 'X';
     }
 
     closesocket(ConnectSocket);
